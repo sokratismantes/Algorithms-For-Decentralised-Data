@@ -1,9 +1,9 @@
 """
-experiments.py (v2)
+experiments.py
 -------------------
 Experimental evaluation for Chord vs Pastry (per assignment):
 
-- Measure hops for: insert / lookup / delete / node join / node leave
+- Measure hops for: build / insert / update / lookup / delete / node join / node leave
 - Produce CSV + plots
 - Print full summaries after completion
 - Run a K-concurrent lookup demo (popularities) for both protocols
@@ -16,7 +16,7 @@ Important fix vs v1:
   and we set 'hops' = locate_hops for join/leave so the plot reflects DHT routing cost.
 
 Colab example:
-  !python experiments.py --file /content/data_movies_clean.csv --nodes 16,32,64 --max_rows 50000 --records 20000 --queries 5000 --deletes 2000 --joins 10 --leaves 10 --K 10
+  !python experiments.py --file /content/data_movies_clean.csv --nodes 16,32,64 --max_rows 50000 --records 20000 --updates 2000 --queries 5000 --deletes 2000 --joins 10 --leaves 10 --K 10
 """
 
 from __future__ import annotations
@@ -80,10 +80,11 @@ def _print_header(title: str):
 def plot_results(df_res: pd.DataFrame, outdir: Path):
     """
     For join/leave we plot df_res['hops'], which we set to locate_hops.
+    For build/update we plot df_res['hops'] like any other operation.
     """
     outdir.mkdir(parents=True, exist_ok=True)
 
-    for op in ["insert", "lookup", "delete", "join", "leave"]:
+    for op in ["build", "insert", "update", "lookup", "delete", "join", "leave"]:
         d = df_res[df_res["operation"] == op]
         if d.empty:
             continue
@@ -173,6 +174,7 @@ def run_for_N(
     m: int,
     N: int,
     records_n: int,
+    updates_n: int,   # NEW
     queries_n: int,
     deletes_n: int,
     joins_n: int,
@@ -194,6 +196,11 @@ def run_for_N(
     chord_ids = set(base_node_ids)
     pastry_ids = set(base_node_ids)
 
+    # Track build cost (average initial join locate hops per protocol)
+    build_sum_c = 0
+    build_sum_p = 0
+    build_cnt = 0
+
     # Initial joins: keep them for completeness
     for nid in base_node_ids:
         # Chord join_node returns (new_node, total_hops, moved_count)
@@ -202,12 +209,21 @@ def run_for_N(
         locate_c = total_c  # initial phase OK
         move_c = 0
         rows.append(_row("Chord", "join", "initial", N, hops=locate_c, locate_hops=locate_c, move_hops=move_c, moved_keys=moved_c))
+        build_sum_c += locate_c
 
         # Pastry join_node returns (new_node, total_hops, moved_count) where total includes locate+move in your ring
         _, total_p, moved_p = pastry.join_node(nid)
         locate_p = total_p  # initial phase OK
         move_p = 0
         rows.append(_row("Pastry", "join", "initial", N, hops=locate_p, locate_hops=locate_p, move_hops=move_p, moved_keys=moved_p))
+        build_sum_p += locate_p
+
+        build_cnt += 1
+
+    # NEW: Add a distinct "build" query result per protocol (avg initial join locate hops)
+    if build_cnt > 0:
+        rows.append(_row("Chord", "build", "initial", N, hops=int(round(build_sum_c / build_cnt))))
+        rows.append(_row("Pastry", "build", "initial", N, hops=int(round(build_sum_p / build_cnt))))
 
     # ---------- Prepare records ----------
     df_rec = _pick_records(df, records_n, seed=seed + N)
@@ -221,6 +237,32 @@ def run_for_N(
 
         hops_p = pastry.insert_title(title, rec, start_node=_random_start_pastry(pastry))
         rows.append(_row("Pastry", "insert", "workload", N, hops=hops_p))
+
+    # ---------- Updates (NEW) ----------
+    # We measure hops as the routing hops to locate the owner (same as lookup), and then update the stored record in-place.
+    if len(titles) > 0 and updates_n > 0:
+        u_titles = random.sample(titles, k=min(updates_n, len(titles)))
+        for t in u_titles:
+            recs_c, hops_c = chord.lookup(t, start_node=_random_start_chord(chord))
+            if recs_c:
+                old = recs_c[0].get("popularity")
+                # set a deterministic-but-different numeric value when possible
+                try:
+                    new_val = float(old) + 0.001
+                except Exception:
+                    new_val = old
+                recs_c[0]["popularity"] = new_val
+            rows.append(_row("Chord", "update", "workload", N, hops=hops_c))
+
+            recs_p, hops_p = pastry.lookup(t, start_node=_random_start_pastry(pastry))
+            if recs_p:
+                old = recs_p[0].get("popularity")
+                try:
+                    new_val = float(old) + 0.001
+                except Exception:
+                    new_val = old
+                recs_p[0]["popularity"] = new_val
+            rows.append(_row("Pastry", "update", "workload", N, hops=hops_p))
 
     # ---------- Lookups (exact match) ----------
     if len(titles) > 0:
@@ -344,7 +386,7 @@ def print_assignment_outputs(df: pd.DataFrame, res: pd.DataFrame, outdir: Path, 
 
     _print_header("OUTPUT FILES")
     print("CSV:", str(outdir / "results.csv"))
-    for op in ["insert", "lookup", "delete", "join", "leave"]:
+    for op in ["build", "insert", "update", "lookup", "delete", "join", "leave"]:
         p = outdir / f"{op}.png"
         if p.exists():
             print("Plot:", str(p))
@@ -400,6 +442,7 @@ def main():
     ap.add_argument("--m", type=int, default=40, help="Keyspace bits (default 40).")
     ap.add_argument("--nodes", type=str, default="16,32,64", help="Comma-separated node counts, e.g. 16,32,64")
     ap.add_argument("--records", type=int, default=20_000, help="Number of records to insert per N.")
+    ap.add_argument("--updates", type=int, default=2_000, help="Number of updates per N. (NEW)")
     ap.add_argument("--queries", type=int, default=5_000, help="Number of lookups per N.")
     ap.add_argument("--deletes", type=int, default=2_000, help="Number of deletes per N.")
     ap.add_argument("--joins", type=int, default=10, help="Number of dynamic joins per N.")
@@ -427,7 +470,7 @@ def main():
     print("max_rows:", args.max_rows)
     print("m:", args.m)
     print("nodes:", nodes_list)
-    print("records:", args.records, "queries:", args.queries, "deletes:", args.deletes, "joins:", args.joins, "leaves:", args.leaves)
+    print("records:", args.records, "updates:", args.updates, "queries:", args.queries, "deletes:", args.deletes, "joins:", args.joins, "leaves:", args.leaves)
     print("K (concurrent demo):", args.K)
     print("seed:", args.seed)
     print("outdir:", str(outdir))
@@ -441,6 +484,7 @@ def main():
                 m=args.m,
                 N=N,
                 records_n=min(args.records, len(df)),
+                updates_n=args.updates,
                 queries_n=args.queries,
                 deletes_n=args.deletes,
                 joins_n=args.joins,
