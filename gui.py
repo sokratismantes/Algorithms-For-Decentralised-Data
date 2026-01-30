@@ -65,7 +65,7 @@ def make_zip(outdir: Path, zip_path: Path, include_dataset: Path = None):
         # results csv + plots
         if (outdir / "results.csv").exists():
             z.write(outdir / "results.csv", arcname="results/results.csv")
-        for op in ["insert","lookup","delete","join","leave"]:
+        for op in ["build","insert","update","lookup","delete","join","leave"]:  # CHANGED
             p = outdir / f"{op}.png"
             if p.exists():
                 z.write(p, arcname=f"results/{op}.png")
@@ -92,6 +92,7 @@ max_rows_int = widgets.IntText(value=50000, description="max_rows", layout=widge
 outdir_text = widgets.Text(value="results", description="outdir", layout=widgets.Layout(width="220px"))
 
 records_int = widgets.IntText(value=20000, description="records", layout=widgets.Layout(width="220px"))
+updates_int = widgets.IntText(value=2000, description="updates", layout=widgets.Layout(width="220px"))  # NEW
 queries_int = widgets.IntText(value=5000, description="queries", layout=widgets.Layout(width="220px"))
 deletes_int = widgets.IntText(value=2000, description="deletes", layout=widgets.Layout(width="220px"))
 joins_int = widgets.IntText(value=10, description="joins", layout=widgets.Layout(width="220px"))
@@ -135,7 +136,7 @@ def validate_params():
     kind = "ok"
     if file_dropdown.value is None:
         return "No dataset file found in /content. Upload a .csv or .xlsx first.", "err"
-    if records_int.value < 0 or queries_int.value < 0 or deletes_int.value < 0 or joins_int.value < 0 or leaves_int.value < 0:
+    if records_int.value < 0 or updates_int.value < 0 or queries_int.value < 0 or deletes_int.value < 0 or joins_int.value < 0 or leaves_int.value < 0:
         return "Counts must be non-negative.", "err"
     if max_rows_int.value <= 0:
         return "max_rows must be > 0", "err"
@@ -230,8 +231,8 @@ params_card = widgets.VBox([
     """),
     widgets.HBox([nodes_text, m_int, seed_int]),
     widgets.HBox([outdir_text, K_int]),
-    widgets.HBox([records_int, queries_int, deletes_int]),
-    widgets.HBox([joins_int, leaves_int]),
+    widgets.HBox([records_int, updates_int, queries_int]),
+    widgets.HBox([deletes_int, joins_int, leaves_int]),
     widgets.HBox([force_records_chk, show_plots_chk]),
 ])
 
@@ -303,6 +304,10 @@ def on_run(_):
     if force_records_chk.value and records > max_rows:
         records = max_rows
 
+    updates = int(updates_int.value)
+    if force_records_chk.value and updates > records:
+        updates = records
+
     # Convert if requested and XLSX
     if convert_chk.value and ds_path.suffix.lower() in (".xlsx", ".xls"):
         final_path, used_rows = ensure_csv_from_xlsx(
@@ -320,6 +325,7 @@ def on_run(_):
         "--max_rows", str(max_rows),
         "--m", str(int(m_int.value)),
         "--records", str(records),
+        "--updates", str(updates),
         "--queries", str(int(queries_int.value)),
         "--deletes", str(int(deletes_int.value)),
         "--joins", str(int(joins_int.value)),
@@ -376,7 +382,7 @@ def on_show(_):
 
         if show_plots_chk.value:
             display(Markdown("#### Plots"))
-            for op in ["insert","lookup","delete","join","leave"]:
+            for op in ["build","insert","update","lookup","delete","join","leave"]:  # CHANGED
                 img = outdir / f"{op}.png"
                 if img.exists():
                     display(Markdown(f"**{op}.png**"))
