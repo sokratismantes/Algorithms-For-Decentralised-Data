@@ -152,7 +152,7 @@ class PastryRing:
                 if new_node.distance_to(k) < n.distance_to(k):
                     # routing cost from n to key (overlay forwards)
                     _, h = self._route(n, k)
-                    moved_hops += h + 1  # +1 as transfer message
+                    moved_hops += h   
                     new_node.btree.insert(rec, k)
                     n.btree.delete(k)
                     moved += 1
@@ -185,7 +185,7 @@ class PastryRing:
         total_hops = 0
         for k, rec in items:
             owner, h = self._route(start, k)
-            total_hops += h + 1
+            total_hops += h 
             owner.btree.insert(rec, k)
             moved += 1
 
