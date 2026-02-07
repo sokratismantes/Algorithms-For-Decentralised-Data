@@ -1,16 +1,10 @@
-import hashlib
 from b_tree import BPlusTree
+import hashlib
 
 
-# keys: modulo m (2^m)
-# metatrepw to value se bytes gia to sha1,
-# mesw tou sha1 ftiaxnw to hash
-# metatrepw hash se dekadiko
-# epeita ton kanw modulo m gia na brw to key tou
-# Gia m=40 den exw collisions diaforetikwn titlwn (praktika gia to dataset)
 def chord_hash(value, m=40):
     h = hashlib.sha1(str(value).encode()).hexdigest()
-    num = int(h, 16) % (2 ** m)
+    num = int(h, 16) % (2**m)
     return num
 
 
@@ -53,43 +47,41 @@ class ChordRing:
     # ------------------------- routing -------------------------
     def find_successor(self, key, start_node=None):
         """
-        Euresh successor enos key.
-        Hops = arithmos overlay forwards (curr -> next).
+        Find the successor node for a given key using Chord routing.
+        Returns (node, hops).
         """
         if not self.nodes:
-            raise RuntimeError("Chord ring has no nodes")
+            return None, 0
 
-        if start_node is None:
-            start_node = self.nodes[0]
-
-        hops = 0
+        start_node = start_node or self.nodes[0]
         curr = start_node
+        hops = 0
 
-        # 1 node case
-        if curr.successor is None:
-            return curr, hops
-
-        # safety to avoid infinite loops in bad finger tables
+        # safety bound to avoid infinite loops 
         max_steps = max(4, len(self.nodes) * 4)
 
-        while not self._in_interval(key, curr.node_id, curr.successor.node_id):
-            nxt = self.closest_preceding_finger(curr, key)
+        while True:
+            if key == curr.node_id:
+                return curr, hops
 
-            # if we cannot progress via fingers, move to successor to guarantee progress
-            if nxt is curr:
-                nxt = curr.successor
+            # normal success condition
+            succ = curr.successor
+            if self._in_interval(key, curr.node_id, succ.node_id):
+                return succ, hops + 1  # count the final hop to successor
+
+            nxt = self.closest_preceding_finger(curr, key)
+            if nxt is None or nxt is curr:
+                nxt = succ
 
             curr = nxt
             hops += 1
 
             if hops > max_steps:
-                # linear scan 
+                # fallback to linear scan 
                 return self.find_successor_linear(key), hops
 
-        return curr.successor, hops
-
     def find_successor_linear(self, key):
-        """Linear successor search (used for finger init / safety)."""
+        """Linear successor search."""
         for node in self.nodes:
             if key <= node.node_id:
                 return node
@@ -108,9 +100,9 @@ class ChordRing:
             self.init_finger_table(node)
 
     def init_finger_table(self, node):
-        max_id = 2 ** self.m
+        max_id = 2**self.m
         for i in range(self.m):
-            start = (node.node_id + 2 ** i) % max_id
+            start = (node.node_id + 2**i) % max_id
             successor = self.find_successor_linear(start)
             node.finger[i] = successor
 
@@ -155,35 +147,35 @@ class ChordRing:
     def join_node(self, node_id, start_node=None):
         """
         Node join.
-        Returns total hops used for:
-        - locating position (routing)
-        - redistributing moved keys (routing per moved key from successor)
+        Returns:
+        - routing hops to locate successor of node_id
+        - moved_cnt
+        - migrate_hops: routing hops used to move keys (sum over moved keys)
         """
-        join_hops = 0
+        locate_hops = 0
 
         # routing cost to find where the node would attach before insertion
         if self.nodes:
-            _, h = self.find_successor(node_id, start_node=start_node or self.nodes[0])
-            join_hops += h
+            _, locate_hops = self.find_successor(node_id, start_node=start_node or self.nodes[0])
 
         new_node = ChordNode(node_id, self.m, btree_size=self.btree_size)
         self.nodes.append(new_node)
         self.nodes.sort(key=lambda n: n.node_id)
         self._update_links()
 
-        moved_hops = 0
+        migrate_hops = 0
         moved_cnt = 0
         if len(self.nodes) > 1:
-            moved_hops, moved_cnt = self._redistribute_keys(new_node)
+            migrate_hops, moved_cnt = self._redistribute_keys(new_node)
 
         self.fix_all_fingers()
-        join_hops += moved_hops
-        return new_node, join_hops, moved_cnt
+
+        return new_node, locate_hops, moved_cnt
 
     def _redistribute_keys(self, new_node):
         """
         Move keys from new_node.successor to new_node when they fall in (pred, new_node].
-        Returns (total_hops, moved_count).
+        Returns (migrate_hops, moved_count).
         """
         pred = new_node.predecessor
         succ = new_node.successor
@@ -194,7 +186,7 @@ class ChordRing:
 
         for key_int, record in items:
             if self._in_interval(key_int, pred.node_id, new_node.node_id):
-                # count routing cost as if successor forwards request in overlay
+                # count routing cost 
                 _, hops = self.find_successor(key_int, start_node=succ)
                 total_hops += hops
                 new_node.btree.insert(record, key_int)
@@ -206,7 +198,9 @@ class ChordRing:
     def leave_node(self, node_id, start_node=None):
         """
         Node leave.
-        Returns total hops used to redistribute keys from leaving node to its successor.
+        Returns:
+        - routing_hops (event): overlay routing cost for the LEAVE request
+        - moved_cnt
         """
         node = next((n for n in self.nodes if n.node_id == node_id), None)
         if not node:
@@ -216,21 +210,25 @@ class ChordRing:
             self.nodes.remove(node)
             return True, 0, 0
 
-        succ = node.successor
-        total_hops = 0
-        moved = 0
+        routing_hops = 0
+        if self.nodes:
+            start = start_node or self.nodes[0]
+            _, routing_hops = self.find_successor(node_id, start_node=start)
 
+        succ = node.successor
+
+        # move data for correctness
+        moved = 0
         items = node.btree.get_all_items()
         for key_int, record in items:
-            _, hops = self.find_successor(key_int, start_node=node)
-            total_hops += hops
             succ.btree.insert(record, key_int)
             moved += 1
 
         self.nodes.remove(node)
         self._update_links()
         self.fix_all_fingers()
-        return True, total_hops, moved
+
+        return True, routing_hops, moved
 
     # ------------------------- debug -------------------------
     def print_nodes_summary(self):
